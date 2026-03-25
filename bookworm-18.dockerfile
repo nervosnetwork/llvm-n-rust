@@ -1,4 +1,4 @@
-FROM docker.io/buildpack-deps:bookworm as builder
+FROM docker.io/buildpack-deps:trixie as builder
 MAINTAINER Xuejie Xiao <xxuejie@gmail.com>
 
 RUN apt-get update && apt-get install -y cmake
@@ -21,11 +21,11 @@ RUN cmake ../llvm \
   -DLLVM_ENABLE_PROJECTS="clang;lld" \
   -DLLVM_TARGETS_TO_BUILD="X86;AArch64;RISCV" \
   -DLLVM_LINK_LLVM_DYLIB=ON
-# RUN make -j$(nproc)
-RUN make -j2
+RUN make -j$(nproc)
+# RUN make -j2
 RUN make install
 
-FROM docker.io/buildpack-deps:bookworm
+FROM docker.io/buildpack-deps:trixie
 MAINTAINER Xuejie Xiao <xxuejie@gmail.com>
 
 RUN apt-get update && apt-get install -y cmake
@@ -36,7 +36,7 @@ ENV LLVM_HOME /llvm
 ENV PATH "${PATH}:${LLVM_HOME}/bin"
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-  -y --default-toolchain 1.85.1 --target riscv64imac-unknown-none-elf
+  -y --default-toolchain 1.92.0 --target riscv64imac-unknown-none-elf
 ENV PATH "${PATH}:/root/.cargo/bin"
 
 RUN mkdir /code
