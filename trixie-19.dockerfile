@@ -22,7 +22,6 @@ RUN cmake ../llvm \
   -DLLVM_TARGETS_TO_BUILD="X86;AArch64;RISCV" \
   -DLLVM_LINK_LLVM_DYLIB=ON
 RUN make -j$(nproc)
-# RUN make -j2
 RUN make install
 
 FROM docker.io/buildpack-deps:trixie
@@ -31,12 +30,12 @@ MAINTAINER Xuejie Xiao <xxuejie@gmail.com>
 RUN apt-get update && apt-get install -y cmake
 
 COPY --from=builder /llvm /llvm
-RUN find /llvm/bin -not -type d -exec ln -s {} {}-18 \;
+RUN find /llvm/bin -not -type d -exec ln -s {} {}-19 \;
 ENV LLVM_HOME /llvm
 ENV PATH "${PATH}:${LLVM_HOME}/bin"
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-  -y --default-toolchain 1.92.0 --target riscv64imac-unknown-none-elf
+  -y --default-toolchain 1.95.0 --target riscv64imac-unknown-none-elf
 ENV PATH "${PATH}:/root/.cargo/bin"
 
 RUN mkdir /code
