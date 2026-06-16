@@ -1,0 +1,153 @@
+name: Manual Build LLVM-Rust Images
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: nervos/llvm-n-rust
+
+jobs:
+  prepare:
+    name: Prepare Matrix & Date
+    runs-on: ubuntu-latest
+    outputs:
+      dockerfiles: ${{ steps.scan.outputs.dockerfiles }}
+      variants: ${{ steps.scan.outputs.variants }}
+      build_date: ${{ steps.date.outputs.date }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Get current date
+        id: date
+        # Generate YYYYMMDD date format (e.g., 20260615)
+        run: echo "date=$(TZ=Asia/Shanghai date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Scan for dockerfiles
+        id: scan
+        run: |
+          # Find all .dockerfile files in the root directory
+          FILES=$(find . -maxdepth 1 -name "*.dockerfile" -printf "%f\n")
+          
+          if [ -z "$FILES" ]; then
+            echo "Error: No .dockerfile found!"
+            exit 1
+          fi
+          
+          # Convert filenames and extracted variants to JSON arrays for the matrix
+          FILES_JSON=$(echo "$FILES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          VARIANTS_JSON=$(echo "$FILES" | sed 's/\.dockerfile//' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          echo "dockerfiles=$FILES_JSON" >> $GITHUB_OUTPUT
+          echo "variants=$VARIANTS_JSON" >> $GITHUB_OUTPUT
+
+  build-images:
+    name: Build ${{ matrix.dockerfile }} on ${{ matrix.platform.arch }}
+    needs: prepare
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-22.04-arm }
+        dockerfile: ${{ fromJson(needs.prepare.outputs.dockerfiles) }}
+          
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Crucial: Free up disk space for LLVM compilation
+      - name: Free up disk space
+        run: |
+          echo "Disk space before cleanup:"
+          df -h
+          
+          # Delete heavy, unused pre-installed environments (safe to run even if not exists)
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          
+          # Clean up unused docker images
+          sudo docker image prune --all --force
+          
+          echo "Disk space after cleanup:"
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Variant Name
+        id: variant
+        # Extract "trixie-19" from "trixie-19.dockerfile"
+        run: |
+          FILE_NAME="${{ matrix.dockerfile }}"
+          echo "name=${FILE_NAME%.dockerfile}" >> $GITHUB_OUTPUT
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            # Temporary tag for single-arch images before manifest merging
+            type=sha,format=short,suffix=-${{ steps.variant.outputs.name }}-${{ matrix.platform.arch }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./${{ matrix.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-${{ steps.variant.outputs.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ steps.variant.outputs.name }}-${{ matrix.platform.arch }}
+
+  create-manifests:
+    name: Merge Manifests
+    needs: [prepare, build-images]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: ${{ fromJson(needs.prepare.outputs.variants) }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract SHA
+        id: extract
+        run: echo "sha_tag=sha-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Create and push multi-arch manifest
+        env:
+          BASE_IMG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          SHA_TAG: ${{ steps.extract.outputs.sha_tag }}
+          VARIANT: ${{ matrix.variant }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+        run: |
+          SRC_AMD64="$BASE_IMG:$SHA_TAG-$VARIANT-amd64"
+          SRC_ARM64="$BASE_IMG:$SHA_TAG-$VARIANT-arm64"
+          
+          # Target tag 1: e.g., nervos/llvm-n-rust:YYYYMMDD-trixie-19
+          docker buildx imagetools create -t $BASE_IMG:$BUILD_DATE-$VARIANT $SRC_AMD64 $SRC_ARM64
+          
+          # Target tag 2: e.g., nervos/llvm-n-rust:YYYYMMDD (Latest build of the day)
+          docker buildx imagetools create -t $BASE_IMG:$BUILD_DATE $SRC_AMD64 $SRC_ARM64
